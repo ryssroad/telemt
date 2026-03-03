@@ -472,6 +472,10 @@ pub struct GeneralConfig {
     #[serde(default = "default_upstream_unhealthy_fail_threshold")]
     pub upstream_unhealthy_fail_threshold: u32,
 
+    /// Skip additional retries for hard non-transient upstream connect errors.
+    #[serde(default = "default_upstream_connect_failfast_hard_errors")]
+    pub upstream_connect_failfast_hard_errors: bool,
+
     /// Ignore STUN/interface IP mismatch (keep using Middle Proxy even if NAT detected).
     #[serde(default)]
     pub stun_iface_mismatch_ignore: bool,
@@ -682,6 +686,7 @@ impl Default for GeneralConfig {
             upstream_connect_retry_attempts: default_upstream_connect_retry_attempts(),
             upstream_connect_retry_backoff_ms: default_upstream_connect_retry_backoff_ms(),
             upstream_unhealthy_fail_threshold: default_upstream_unhealthy_fail_threshold(),
+            upstream_connect_failfast_hard_errors: default_upstream_connect_failfast_hard_errors(),
             stun_iface_mismatch_ignore: false,
             unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,

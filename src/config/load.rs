@@ -676,6 +676,10 @@ mod tests {
             cfg.general.upstream_unhealthy_fail_threshold,
             default_upstream_unhealthy_fail_threshold()
         );
+        assert_eq!(
+            cfg.general.upstream_connect_failfast_hard_errors,
+            default_upstream_connect_failfast_hard_errors()
+        );
         assert_eq!(cfg.general.update_every, default_update_every());
         assert_eq!(cfg.server.listen_addr_ipv4, default_listen_addr_ipv4());
         assert_eq!(cfg.server.listen_addr_ipv6, default_listen_addr_ipv6_opt());
@@ -750,6 +754,10 @@ mod tests {
         assert_eq!(
             general.upstream_unhealthy_fail_threshold,
             default_upstream_unhealthy_fail_threshold()
+        );
+        assert_eq!(
+            general.upstream_connect_failfast_hard_errors,
+            default_upstream_connect_failfast_hard_errors()
         );
         assert_eq!(general.update_every, default_update_every());
 
