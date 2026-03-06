@@ -76,6 +76,10 @@ Notes:
 | Method | Path | Body | Success | `data` contract |
 | --- | --- | --- | --- | --- |
 | `GET` | `/v1/health` | none | `200` | `HealthData` |
+| `GET` | `/v1/system/info` | none | `200` | `SystemInfoData` |
+| `GET` | `/v1/runtime/gates` | none | `200` | `RuntimeGatesData` |
+| `GET` | `/v1/limits/effective` | none | `200` | `EffectiveLimitsData` |
+| `GET` | `/v1/security/posture` | none | `200` | `SecurityPostureData` |
 | `GET` | `/v1/stats/summary` | none | `200` | `SummaryData` |
 | `GET` | `/v1/stats/zero/all` | none | `200` | `ZeroAllData` |
 | `GET` | `/v1/stats/upstreams` | none | `200` | `UpstreamsData` |
@@ -175,6 +179,94 @@ Note: the request contract is defined, but the corresponding route currently ret
 | `connections_bad_total` | `u64` | Failed/invalid client connections. |
 | `handshake_timeouts_total` | `u64` | Handshake timeout count. |
 | `configured_users` | `usize` | Number of configured users in config. |
+
+### `SystemInfoData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `version` | `string` | Binary version (`CARGO_PKG_VERSION`). |
+| `target_arch` | `string` | Target architecture (`std::env::consts::ARCH`). |
+| `target_os` | `string` | Target OS (`std::env::consts::OS`). |
+| `build_profile` | `string` | Build profile (`PROFILE` env when available). |
+| `git_commit` | `string?` | Optional commit hash from build env metadata. |
+| `build_time_utc` | `string?` | Optional build timestamp from build env metadata. |
+| `rustc_version` | `string?` | Optional compiler version from build env metadata. |
+| `process_started_at_epoch_secs` | `u64` | Process start time as Unix epoch seconds. |
+| `uptime_seconds` | `f64` | Process uptime in seconds. |
+| `config_path` | `string` | Active config file path used by runtime. |
+| `config_hash` | `string` | SHA-256 hash of current config content (same value as envelope `revision`). |
+| `config_reload_count` | `u64` | Number of successfully observed config updates since process start. |
+| `last_config_reload_epoch_secs` | `u64?` | Unix epoch seconds of the latest observed config reload; null/absent before first reload. |
+
+### `RuntimeGatesData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `accepting_new_connections` | `bool` | Current admission-gate state for new listener accepts. |
+| `conditional_cast_enabled` | `bool` | Whether conditional ME admission logic is enabled (`general.use_middle_proxy`). |
+| `me_runtime_ready` | `bool` | Current ME runtime readiness status used for conditional gate decisions. |
+| `me2dc_fallback_enabled` | `bool` | Whether ME -> direct fallback is enabled. |
+| `use_middle_proxy` | `bool` | Current transport mode preference. |
+
+### `EffectiveLimitsData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `update_every_secs` | `u64` | Effective unified updater interval. |
+| `me_reinit_every_secs` | `u64` | Effective ME periodic reinit interval. |
+| `me_pool_force_close_secs` | `u64` | Effective stale-writer force-close timeout. |
+| `timeouts` | `EffectiveTimeoutLimits` | Effective timeout policy snapshot. |
+| `upstream` | `EffectiveUpstreamLimits` | Effective upstream connect/retry limits. |
+| `middle_proxy` | `EffectiveMiddleProxyLimits` | Effective ME pool/floor/reconnect limits. |
+| `user_ip_policy` | `EffectiveUserIpPolicyLimits` | Effective unique-IP policy mode/window. |
+
+#### `EffectiveTimeoutLimits`
+| Field | Type | Description |
+| --- | --- | --- |
+| `client_handshake_secs` | `u64` | Client handshake timeout. |
+| `tg_connect_secs` | `u64` | Upstream Telegram connect timeout. |
+| `client_keepalive_secs` | `u64` | Client keepalive interval. |
+| `client_ack_secs` | `u64` | ACK timeout. |
+| `me_one_retry` | `u8` | Fast retry count for single-endpoint ME DC. |
+| `me_one_timeout_ms` | `u64` | Fast retry timeout per attempt for single-endpoint ME DC. |
+
+#### `EffectiveUpstreamLimits`
+| Field | Type | Description |
+| --- | --- | --- |
+| `connect_retry_attempts` | `u32` | Upstream connect retry attempts. |
+| `connect_retry_backoff_ms` | `u64` | Upstream retry backoff delay. |
+| `connect_budget_ms` | `u64` | Total connect wall-clock budget across retries. |
+| `unhealthy_fail_threshold` | `u32` | Consecutive fail threshold for unhealthy marking. |
+| `connect_failfast_hard_errors` | `bool` | Whether hard errors skip additional retries. |
+
+#### `EffectiveMiddleProxyLimits`
+| Field | Type | Description |
+| --- | --- | --- |
+| `floor_mode` | `string` | Effective floor mode (`static` or `adaptive`). |
+| `adaptive_floor_idle_secs` | `u64` | Adaptive floor idle threshold. |
+| `adaptive_floor_min_writers_single_endpoint` | `u8` | Adaptive floor minimum for single-endpoint DCs. |
+| `adaptive_floor_recover_grace_secs` | `u64` | Adaptive floor recovery grace period. |
+| `reconnect_max_concurrent_per_dc` | `u32` | Max concurrent reconnects per DC. |
+| `reconnect_backoff_base_ms` | `u64` | Reconnect base backoff. |
+| `reconnect_backoff_cap_ms` | `u64` | Reconnect backoff cap. |
+| `reconnect_fast_retry_count` | `u32` | Number of fast retries before standard backoff strategy. |
+| `me2dc_fallback` | `bool` | Effective ME -> direct fallback flag. |
+
+#### `EffectiveUserIpPolicyLimits`
+| Field | Type | Description |
+| --- | --- | --- |
+| `mode` | `string` | Unique-IP policy mode (`active_window`, `time_window`, `combined`). |
+| `window_secs` | `u64` | Time window length used by unique-IP policy. |
+
+### `SecurityPostureData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `api_read_only` | `bool` | Current API read-only state. |
+| `api_whitelist_enabled` | `bool` | Whether whitelist filtering is active. |
+| `api_whitelist_entries` | `usize` | Number of configured whitelist CIDRs. |
+| `api_auth_header_enabled` | `bool` | Whether `Authorization` header validation is active. |
+| `proxy_protocol_enabled` | `bool` | Global PROXY protocol accept setting. |
+| `log_level` | `string` | Effective log level (`debug`, `verbose`, `normal`, `silent`). |
+| `telemetry_core_enabled` | `bool` | Core telemetry toggle. |
+| `telemetry_user_enabled` | `bool` | Per-user telemetry toggle. |
+| `telemetry_me_level` | `string` | ME telemetry level (`silent`, `normal`, `debug`). |
 
 ### `ZeroAllData`
 | Field | Type | Description |
