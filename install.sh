@@ -29,13 +29,10 @@ detect_arch() {
 }
 
 detect_libc() {
-    if command -v ldd >/dev/null 2>&1; then
-        if ldd --version 2>&1 | grep -iq musl; then
-            printf 'musl\n'
-            return
-        fi
-    fi
-    printf 'gnu\n'
+    case "$(ldd --version 2>&1 || true)" in
+        *musl*) printf 'musl\n' ;;
+        *) printf 'gnu\n' ;;
+    esac
 }
 
 fetch_to_stdout() {
