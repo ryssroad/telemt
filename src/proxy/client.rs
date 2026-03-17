@@ -24,6 +24,7 @@ enum HandshakeOutcome {
     Handled,
 }
 
+#[must_use = "UserConnectionReservation must be kept alive to retain user/IP reservation until release or drop"]
 struct UserConnectionReservation {
     stats: Arc<Stats>,
     ip_tracker: Arc<UserIpTracker>,

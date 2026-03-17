@@ -26,6 +26,7 @@ enum RouteConnectionGauge {
     Middle,
 }
 
+#[must_use = "RouteConnectionLease must be kept alive to hold the connection gauge increment"]
 pub struct RouteConnectionLease {
     stats: Arc<Stats>,
     gauge: RouteConnectionGauge,
