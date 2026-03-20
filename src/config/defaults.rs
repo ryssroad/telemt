@@ -514,6 +514,18 @@ pub(crate) fn default_alpn_enforce() -> bool {
     true
 }
 
+pub(crate) fn default_mask_shape_hardening() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_shape_bucket_floor_bytes() -> usize {
+    512
+}
+
+pub(crate) fn default_mask_shape_bucket_cap_bytes() -> usize {
+    4096
+}
+
 pub(crate) fn default_stun_servers() -> Vec<String> {
     vec![
         "stun.l.google.com:5349".to_string(),

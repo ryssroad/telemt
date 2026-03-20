@@ -1394,6 +1394,19 @@ pub struct AntiCensorshipConfig {
     /// Allows the backend to see the real client IP.
     #[serde(default)]
     pub mask_proxy_protocol: u8,
+
+    /// Enable shape-channel hardening on mask backend path by padding
+    /// client->mask stream tail to configured buckets on stream end.
+    #[serde(default = "default_mask_shape_hardening")]
+    pub mask_shape_hardening: bool,
+
+    /// Minimum bucket size for mask shape hardening padding.
+    #[serde(default = "default_mask_shape_bucket_floor_bytes")]
+    pub mask_shape_bucket_floor_bytes: usize,
+
+    /// Maximum bucket size for mask shape hardening padding.
+    #[serde(default = "default_mask_shape_bucket_cap_bytes")]
+    pub mask_shape_bucket_cap_bytes: usize,
 }
 
 impl Default for AntiCensorshipConfig {
@@ -1415,6 +1428,9 @@ impl Default for AntiCensorshipConfig {
             tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
             mask_proxy_protocol: 0,
+            mask_shape_hardening: default_mask_shape_hardening(),
+            mask_shape_bucket_floor_bytes: default_mask_shape_bucket_floor_bytes(),
+            mask_shape_bucket_cap_bytes: default_mask_shape_bucket_cap_bytes(),
         }
     }
 }

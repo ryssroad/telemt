@@ -30,12 +30,13 @@ const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const MASK_BUFFER_SIZE: usize = 8192;
 
-async fn copy_with_idle_timeout<R, W>(reader: &mut R, writer: &mut W)
+async fn copy_with_idle_timeout<R, W>(reader: &mut R, writer: &mut W) -> usize
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut buf = [0u8; MASK_BUFFER_SIZE];
+    let mut total = 0usize;
     loop {
         let read_res = timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf)).await;
         let n = match read_res {
@@ -45,6 +46,7 @@ where
         if n == 0 {
             break;
         }
+        total = total.saturating_add(n);
 
         let write_res = timeout(MASK_RELAY_IDLE_TIMEOUT, writer.write_all(&buf[..n])).await;
         match write_res {
@@ -52,6 +54,54 @@ where
             Ok(Err(_)) | Err(_) => break,
         }
     }
+    total
+}
+
+fn next_mask_shape_bucket(total: usize, floor: usize, cap: usize) -> usize {
+    if total == 0 || floor == 0 || cap < floor {
+        return total;
+    }
+
+    if total >= cap {
+        return total;
+    }
+
+    let mut bucket = floor;
+    while bucket < total {
+        match bucket.checked_mul(2) {
+            Some(next) => bucket = next,
+            None => return total,
+        }
+        if bucket > cap {
+            return total;
+        }
+    }
+    bucket
+}
+
+async fn maybe_write_shape_padding<W>(
+    mask_write: &mut W,
+    total_sent: usize,
+    enabled: bool,
+    floor: usize,
+    cap: usize,
+)
+where
+    W: AsyncWrite + Unpin,
+{
+    if !enabled {
+        return;
+    }
+
+    let bucket = next_mask_shape_bucket(total_sent, floor, cap);
+    if bucket <= total_sent {
+        return;
+    }
+
+    let pad_len = bucket - total_sent;
+    let pad = vec![0u8; pad_len];
+    let _ = timeout(MASK_TIMEOUT, mask_write.write_all(&pad)).await;
+    let _ = timeout(MASK_TIMEOUT, mask_write.flush()).await;
 }
 
 async fn write_proxy_header_with_timeout<W>(mask_write: &mut W, header: &[u8]) -> bool
@@ -201,7 +251,22 @@ where
                         return;
                     }
                 }
-                if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
+                if timeout(
+                    MASK_RELAY_TIMEOUT,
+                    relay_to_mask(
+                        reader,
+                        writer,
+                        mask_read,
+                        mask_write,
+                        initial_data,
+                        config.censorship.mask_shape_hardening,
+                        config.censorship.mask_shape_bucket_floor_bytes,
+                        config.censorship.mask_shape_bucket_cap_bytes,
+                    ),
+                )
+                .await
+                .is_err()
+                {
                     debug!("Mask relay timed out (unix socket)");
                 }
                 wait_mask_outcome_budget(outcome_started).await;
@@ -252,7 +317,22 @@ where
                     return;
                 }
             }
-            if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
+            if timeout(
+                MASK_RELAY_TIMEOUT,
+                relay_to_mask(
+                    reader,
+                    writer,
+                    mask_read,
+                    mask_write,
+                    initial_data,
+                    config.censorship.mask_shape_hardening,
+                    config.censorship.mask_shape_bucket_floor_bytes,
+                    config.censorship.mask_shape_bucket_cap_bytes,
+                ),
+            )
+            .await
+            .is_err()
+            {
                 debug!("Mask relay timed out");
             }
             wait_mask_outcome_budget(outcome_started).await;
@@ -278,6 +358,9 @@ async fn relay_to_mask<R, W, MR, MW>(
     mut mask_read: MR,
     mut mask_write: MW,
     initial_data: &[u8],
+    shape_hardening_enabled: bool,
+    shape_bucket_floor_bytes: usize,
+    shape_bucket_cap_bytes: usize,
 )
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -295,11 +378,20 @@ where
 
     let _ = tokio::join!(
         async {
-            copy_with_idle_timeout(&mut reader, &mut mask_write).await;
+            let copied = copy_with_idle_timeout(&mut reader, &mut mask_write).await;
+            let total_sent = initial_data.len().saturating_add(copied);
+            maybe_write_shape_padding(
+                &mut mask_write,
+                total_sent,
+                shape_hardening_enabled,
+                shape_bucket_floor_bytes,
+                shape_bucket_cap_bytes,
+            )
+            .await;
             let _ = mask_write.shutdown().await;
         },
         async {
-            copy_with_idle_timeout(&mut mask_read, &mut writer).await;
+            let _ = copy_with_idle_timeout(&mut mask_read, &mut writer).await;
             let _ = writer.shutdown().await;
         }
     );

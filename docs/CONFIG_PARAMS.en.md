@@ -260,6 +260,38 @@ This document lists all configuration keys accepted by `config.toml`.
 | tls_full_cert_ttl_secs | `u64` | `90` | — | TTL for sending full cert payload per (domain, client IP) tuple. |
 | alpn_enforce | `bool` | `true` | — | Enforces ALPN echo behavior based on client preference. |
 | mask_proxy_protocol | `u8` | `0` | — | PROXY protocol mode for mask backend (`0` disabled, `1` v1, `2` v2). |
+| mask_shape_hardening | `bool` | `false` | — | Enables client->mask shape-channel hardening by applying controlled tail padding to bucket boundaries on mask relay shutdown. |
+| mask_shape_bucket_floor_bytes | `usize` | `512` | Must be `> 0`; should be `<= mask_shape_bucket_cap_bytes`. | Minimum bucket size used by shape-channel hardening. |
+| mask_shape_bucket_cap_bytes | `usize` | `4096` | Must be `>= mask_shape_bucket_floor_bytes`. | Maximum bucket size used by shape-channel hardening; traffic above cap is not padded further. |
+
+### Shape-channel hardening notes (`[censorship]`)
+
+These parameters are designed to reduce one specific fingerprint source during masking: the exact number of bytes sent from proxy to `mask_host` for invalid or probing traffic.
+
+Without hardening, a censor can often correlate probe input length with backend-observed length very precisely (for example: `5 + body_sent` on early TLS reject paths). That creates a length-based classifier signal.
+
+When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail to a bucket boundary at relay shutdown:
+
+- Total bytes sent to mask are first measured.
+- A bucket is selected using powers of two starting from `mask_shape_bucket_floor_bytes`.
+- Padding is added only if total bytes are below `mask_shape_bucket_cap_bytes`.
+- If bytes already exceed cap, no extra padding is added.
+
+This means multiple nearby probe sizes collapse into the same backend-observed size class, making active classification harder.
+
+Practical trade-offs:
+
+- Better anti-fingerprinting on size/shape channel.
+- Slightly higher egress overhead for small probes due to padding.
+- Behavior is intentionally conservative and disabled by default.
+
+Recommended starting profile:
+
+- `mask_shape_hardening = true`
+- `mask_shape_bucket_floor_bytes = 512`
+- `mask_shape_bucket_cap_bytes = 4096`
+
+If your backend or network is very bandwidth-constrained, reduce cap first. If probes are still too distinguishable in your environment, increase floor gradually.
 
 ## [access]
 

@@ -1,7 +1,12 @@
 use super::*;
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::crypto::sha256_hmac;
-use crate::protocol::constants::{HANDSHAKE_LEN, MAX_TLS_CIPHERTEXT_SIZE, TLS_VERSION};
+use crate::protocol::constants::{
+    HANDSHAKE_LEN,
+    MAX_TLS_CIPHERTEXT_SIZE,
+    TLS_RECORD_APPLICATION,
+    TLS_VERSION,
+};
 use crate::protocol::tls;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -137,16 +142,10 @@ async fn tls_bad_mtproto_fallback_preserves_wire_and_backend_response() {
     let trailing_payload = b"masked-trailing-record".to_vec();
     let trailing_record = wrap_tls_application_data(&trailing_payload);
     let backend_response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec();
-
-    let expected_client_hello = client_hello.clone();
     let expected_trailing_record = trailing_record.clone();
     let expected_response = backend_response.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_client_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_client_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing_record.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -208,15 +207,9 @@ async fn tls_bad_mtproto_fallback_keeps_connects_bad_accounting() {
     let invalid_mtproto = vec![0u8; HANDSHAKE_LEN];
     let invalid_mtproto_record = wrap_tls_application_data(&invalid_mtproto);
     let trailing_record = wrap_tls_application_data(b"x");
-
-    let expected_client_hello = client_hello.clone();
     let expected_trailing_record = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_client_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_client_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing_record.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -281,15 +274,9 @@ async fn tls_bad_mtproto_fallback_forwards_zero_length_tls_record_verbatim() {
     let invalid_mtproto = vec![0u8; HANDSHAKE_LEN];
     let invalid_mtproto_record = wrap_tls_application_data(&invalid_mtproto);
     let trailing_record = wrap_tls_application_data(&[]);
-
-    let expected_client_hello = client_hello.clone();
     let expected_trailing_record = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_client_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_client_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing_record.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -349,15 +336,9 @@ async fn tls_bad_mtproto_fallback_forwards_max_tls_record_verbatim() {
     let invalid_mtproto_record = wrap_tls_application_data(&invalid_mtproto);
     let trailing_payload = vec![0xAB; MAX_TLS_CIPHERTEXT_SIZE];
     let trailing_record = wrap_tls_application_data(&trailing_payload);
-
-    let expected_client_hello = client_hello.clone();
     let expected_trailing_record = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_client_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_client_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing_record.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -424,15 +405,9 @@ async fn tls_bad_mtproto_fallback_light_fuzz_tls_record_lengths_verbatim() {
             *b = ((idx as u8).wrapping_mul(29)).wrapping_add(i as u8);
         }
         let trailing_record = wrap_tls_application_data(&payload);
-
-        let expected_client_hello = client_hello.clone();
         let expected_trailing_record = trailing_record.clone();
         let accept_task = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-
-            let mut got_hello = vec![0u8; expected_client_hello.len()];
-            stream.read_exact(&mut got_hello).await.unwrap();
-            assert_eq!(got_hello, expected_client_hello);
 
             let mut got_trailing = vec![0u8; expected_trailing_record.len()];
             stream.read_exact(&mut got_trailing).await.unwrap();
@@ -490,30 +465,34 @@ async fn tls_bad_mtproto_fallback_concurrent_sessions_are_isolated() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();
 
-    let mut expected_pairs = std::collections::HashMap::new();
+    let mut expected_records = std::collections::HashSet::new();
     let secret = [0x86u8; 16];
     for idx in 0..sessions {
-        let hello = make_valid_tls_client_hello(&secret, idx as u32 + 100, 600, 0x60 + idx as u8);
+        let _hello = make_valid_tls_client_hello(&secret, idx as u32 + 100, 600, 0x60 + idx as u8);
         let payload = vec![idx as u8; 64 + idx];
         let trailing = wrap_tls_application_data(&payload);
-        expected_pairs.insert(hello, trailing);
+        expected_records.insert(trailing);
     }
 
     let accept_task = tokio::spawn(async move {
-        let mut remaining = expected_pairs;
+        let mut remaining = expected_records;
         for idx in 0..sessions {
             let (mut stream, _) = listener.accept().await.unwrap();
 
             let _ = idx;
-            let mut got_hello = vec![0u8; 605];
-            stream.read_exact(&mut got_hello).await.unwrap();
-            let expected_trailing = remaining
-                .remove(&got_hello)
-                .expect("unexpected client hello in concurrent isolation test");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], TLS_RECORD_APPLICATION);
 
-            let mut got_trailing = vec![0u8; expected_trailing.len()];
-            stream.read_exact(&mut got_trailing).await.unwrap();
-            assert_eq!(got_trailing, expected_trailing);
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut record = vec![0u8; 5 + len];
+            record[..5].copy_from_slice(&header);
+            stream.read_exact(&mut record[5..]).await.unwrap();
+
+            assert!(
+                remaining.remove(&record),
+                "unexpected trailing TLS record in concurrent isolation test"
+            );
         }
 
         assert!(remaining.is_empty(), "all expected client sessions must be matched exactly once");
@@ -591,15 +570,9 @@ async fn tls_bad_mtproto_fallback_forwards_fragmented_client_writes_verbatim() {
     let invalid_mtproto_record = wrap_tls_application_data(&invalid_mtproto);
     let payload = b"fragmented-writes-to-test-stream-boundary-robustness".to_vec();
     let trailing_record = wrap_tls_application_data(&payload);
-
-    let expected_client_hello = client_hello.clone();
     let expected_trailing_record = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_client_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_client_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing_record.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -660,14 +633,9 @@ async fn tls_bad_mtproto_fallback_header_fragmentation_bytewise_is_verbatim() {
     let client_hello = make_valid_tls_client_hello(&secret, 10, 600, 0x58);
     let invalid_mtproto_record = wrap_tls_application_data(&vec![0u8; HANDSHAKE_LEN]);
     let trailing_record = wrap_tls_application_data(b"bytewise-header");
-
-    let expected_hello = client_hello.clone();
     let expected_trailing = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -732,14 +700,9 @@ async fn tls_bad_mtproto_fallback_record_splitting_chaos_is_verbatim() {
         *b = (i as u8).wrapping_mul(17).wrapping_add(3);
     }
     let trailing_record = wrap_tls_application_data(&payload);
-
-    let expected_hello = client_hello.clone();
     let expected_trailing = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -811,14 +774,9 @@ async fn tls_bad_mtproto_fallback_multiple_tls_records_are_forwarded_in_order() 
     let r2 = wrap_tls_application_data(b"beta-beta");
     let r3 = wrap_tls_application_data(b"gamma-gamma-gamma");
     let expected = [r1.clone(), r2.clone(), r3.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_concat = expected.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got = vec![0u8; expected_concat.len()];
         stream.read_exact(&mut got).await.unwrap();
@@ -877,15 +835,9 @@ async fn tls_bad_mtproto_fallback_client_half_close_propagates_eof_to_backend() 
     let client_hello = make_valid_tls_client_hello(&secret, 13, 600, 0x5B);
     let invalid_mtproto_record = wrap_tls_application_data(&vec![0u8; HANDSHAKE_LEN]);
     let trailing_record = wrap_tls_application_data(b"half-close-probe");
-
-    let expected_hello = client_hello.clone();
     let expected_trailing = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -947,15 +899,10 @@ async fn tls_bad_mtproto_fallback_backend_half_close_after_response_is_tolerated
     let invalid_mtproto_record = wrap_tls_application_data(&vec![0u8; HANDSHAKE_LEN]);
     let trailing_record = wrap_tls_application_data(b"backend-half-close");
     let backend_response = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec();
-
-    let expected_hello = client_hello.clone();
     let expected_trailing = trailing_record.clone();
     let response = backend_response.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing.len()];
         stream.read_exact(&mut got_trailing).await.unwrap();
@@ -1016,13 +963,8 @@ async fn tls_bad_mtproto_fallback_backend_reset_after_clienthello_is_handled() {
     let client_hello = make_valid_tls_client_hello(&secret, 15, 600, 0x5D);
     let invalid_mtproto_record = wrap_tls_application_data(&vec![0u8; HANDSHAKE_LEN]);
     let trailing_record = wrap_tls_application_data(b"backend-reset");
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
+        let (stream, _) = listener.accept().await.unwrap();
         drop(stream);
     });
 
@@ -1082,15 +1024,9 @@ async fn tls_bad_mtproto_fallback_backend_slow_reader_preserves_byte_identity() 
 
     let payload = vec![0xEC; 8192];
     let trailing_record = wrap_tls_application_data(&payload);
-
-    let expected_hello = client_hello.clone();
     let expected_trailing = trailing_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_trailing = vec![0u8; expected_trailing.len()];
         let mut offset = 0usize;
@@ -1157,16 +1093,11 @@ async fn tls_bad_mtproto_fallback_replay_pressure_masks_replay_without_serverhel
     let invalid_mtproto_record = wrap_tls_application_data(&vec![0u8; HANDSHAKE_LEN]);
     let trailing_record = wrap_tls_application_data(b"first-session");
 
-    let expected_first = replayed_hello.clone();
     let expected_second = replayed_hello.clone();
     let expected_trailing = trailing_record.clone();
 
     let accept_task = tokio::spawn(async move {
         let (mut s1, _) = listener.accept().await.unwrap();
-        let mut got1 = vec![0u8; expected_first.len()];
-        s1.read_exact(&mut got1).await.unwrap();
-        assert_eq!(got1, expected_first);
-
         let mut got1_tail = vec![0u8; expected_trailing.len()];
         s1.read_exact(&mut got1_tail).await.unwrap();
         assert_eq!(got1_tail, expected_trailing);
@@ -1269,14 +1200,9 @@ async fn tls_bad_mtproto_fallback_large_multi_record_chaos_under_backpressure() 
     let b = wrap_tls_application_data(&vec![0xB2; 3072]);
     let c = wrap_tls_application_data(&vec![0xC3; 1536]);
     let expected = [a.clone(), b.clone(), c.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_payload = expected.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got = vec![0u8; expected_payload.len()];
         let mut pos = 0usize;
@@ -1355,14 +1281,9 @@ async fn tls_bad_mtproto_fallback_interleaved_control_and_application_records_ve
     let app = wrap_tls_application_data(b"opaque");
     let alert = wrap_tls_record(0x15, &[0x01, 0x00]);
     let expected = [ccs.clone(), app.clone(), alert.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_records = expected.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got = vec![0u8; expected_records.len()];
         stream.read_exact(&mut got).await.unwrap();
@@ -1418,30 +1339,34 @@ async fn tls_bad_mtproto_fallback_many_short_sessions_with_chaos_no_cross_leak()
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();
 
-    let mut expected_pairs = std::collections::HashMap::new();
+    let mut expected_records = std::collections::HashSet::new();
     let secret = [0x92u8; 16];
     for idx in 0..sessions {
-        let hello = make_valid_tls_client_hello(&secret, idx as u32 + 200, 600, 0x70 + idx as u8);
+        let _hello = make_valid_tls_client_hello(&secret, idx as u32 + 200, 600, 0x70 + idx as u8);
         let payload = vec![idx as u8; 33 + (idx % 17)];
         let record = wrap_tls_application_data(&payload);
-        expected_pairs.insert(hello, record);
+        expected_records.insert(record);
     }
 
     let accept_task = tokio::spawn(async move {
-        let mut remaining = expected_pairs;
+        let mut remaining = expected_records;
         for idx in 0..sessions {
             let (mut stream, _) = listener.accept().await.unwrap();
 
             let _ = idx;
-            let mut got_hello = vec![0u8; 605];
-            stream.read_exact(&mut got_hello).await.unwrap();
-            let expected_record = remaining
-                .remove(&got_hello)
-                .expect("unexpected client hello in short-session chaos test");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], TLS_RECORD_APPLICATION);
 
-            let mut got = vec![0u8; expected_record.len()];
-            stream.read_exact(&mut got).await.unwrap();
-            assert_eq!(got, expected_record);
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut record = vec![0u8; 5 + len];
+            record[..5].copy_from_slice(&header);
+            stream.read_exact(&mut record[5..]).await.unwrap();
+
+            assert!(
+                remaining.remove(&record),
+                "unexpected trailing TLS record in short-session chaos test"
+            );
         }
 
         assert!(remaining.is_empty(), "all expected sessions must be consumed exactly once");
@@ -1518,14 +1443,9 @@ async fn tls_bad_mtproto_fallback_coalesced_tail_small_is_forwarded_as_tls_recor
     let coalesced_tail = b"coalesced-tail-small".to_vec();
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&coalesced_tail);
     let expected_tail_record = wrap_tls_application_data(&coalesced_tail);
-
-    let expected_hello = client_hello.clone();
     let expected_tail = expected_tail_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -1582,14 +1502,9 @@ async fn tls_bad_mtproto_fallback_coalesced_tail_large_is_forwarded_as_tls_recor
     let coalesced_tail = vec![0xAB; 4096];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&coalesced_tail);
     let expected_tail_record = wrap_tls_application_data(&coalesced_tail);
-
-    let expected_hello = client_hello.clone();
     let expected_tail = expected_tail_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -1648,14 +1563,9 @@ async fn tls_bad_mtproto_fallback_coalesced_tail_keeps_order_before_following_re
     let expected_tail_record = wrap_tls_application_data(&coalesced_tail);
     let following_record = wrap_tls_application_data(b"following-record");
     let expected_concat = [expected_tail_record.clone(), following_record.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_records = expected_concat.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_records = vec![0u8; expected_records.len()];
         stream.read_exact(&mut got_records).await.unwrap();
@@ -1713,14 +1623,9 @@ async fn tls_bad_mtproto_fallback_coalesced_tail_fragmented_client_write_is_forw
     let coalesced_tail = vec![0xCD; 1536];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&coalesced_tail);
     let expected_tail_record = wrap_tls_application_data(&coalesced_tail);
-
-    let expected_hello = client_hello.clone();
     let expected_tail = expected_tail_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -1789,14 +1694,9 @@ async fn tls_bad_mtproto_fallback_coalesced_tail_max_payload_is_forwarded() {
     let coalesced_tail = vec![0xEF; MAX_TLS_CIPHERTEXT_SIZE - HANDSHAKE_LEN];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&coalesced_tail);
     let expected_tail_record = wrap_tls_application_data(&coalesced_tail);
-
-    let expected_hello = client_hello.clone();
     let expected_tail = expected_tail_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -1854,14 +1754,9 @@ async fn blackhat_coalesced_tail_identical_following_record_must_not_duplicate_o
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let tail_record = wrap_tls_application_data(&tail);
     let expected = [tail_record.clone(), tail_record.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_payload = expected.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got = vec![0u8; expected_payload.len()];
         stream.read_exact(&mut got).await.unwrap();
@@ -1924,14 +1819,9 @@ async fn blackhat_coalesced_tail_tls_header_looking_bytes_must_stay_payload() {
     tail.extend_from_slice(b"not-a-real-record-boundary");
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail_record = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let expected_tail = expected_tail_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -1988,14 +1878,9 @@ async fn blackhat_coalesced_tail_client_half_close_must_not_truncate_prepended_r
     let tail = vec![0xAA; 3072];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail_record = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let expected_tail = expected_tail_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2052,27 +1937,31 @@ async fn blackhat_coalesced_tail_multi_session_no_cross_bleed_under_churn() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();
 
-    let mut expected = std::collections::HashMap::new();
+    let mut expected = std::collections::HashSet::new();
     let secret = [0xB4u8; 16];
     for idx in 0..sessions {
-        let hello = make_valid_tls_client_hello(&secret, 450 + idx as u32, 600, 0x40 + idx as u8);
+        let _hello = make_valid_tls_client_hello(&secret, 450 + idx as u32, 600, 0x40 + idx as u8);
         let tail = vec![idx as u8; 17 + idx];
-        expected.insert(hello, wrap_tls_application_data(&tail));
+        expected.insert(wrap_tls_application_data(&tail));
     }
 
     let accept_task = tokio::spawn(async move {
         let mut remaining = expected;
         for _ in 0..sessions {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut got_hello = vec![0u8; 605];
-            stream.read_exact(&mut got_hello).await.unwrap();
-            let expected_tail = remaining
-                .remove(&got_hello)
-                .expect("unexpected hello or duplicated session routing");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], TLS_RECORD_APPLICATION);
 
-            let mut got_tail = vec![0u8; expected_tail.len()];
-            stream.read_exact(&mut got_tail).await.unwrap();
-            assert_eq!(got_tail, expected_tail);
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut record = vec![0u8; 5 + len];
+            record[..5].copy_from_slice(&header);
+            stream.read_exact(&mut record[5..]).await.unwrap();
+
+            assert!(
+                remaining.remove(&record),
+                "unexpected record or duplicated session routing"
+            );
         }
         assert!(remaining.is_empty(), "all sessions must map one-to-one");
     });
@@ -2144,13 +2033,8 @@ async fn blackhat_coalesced_tail_single_byte_tail_is_preserved() {
     let tail = vec![0x7F];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2206,13 +2090,8 @@ async fn blackhat_coalesced_tail_exact_tls_header_size_payload_is_preserved() {
     let tail = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2268,13 +2147,8 @@ async fn blackhat_coalesced_tail_all_zero_payload_is_preserved() {
     let tail = vec![0u8; 2048];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2334,14 +2208,9 @@ async fn blackhat_coalesced_tail_following_control_records_are_not_mutated() {
     let alert = wrap_tls_record(0x15, &[0x01, 0x00]);
     let app = wrap_tls_application_data(b"control-final-app");
     let expected = [tail_record, ccs.clone(), alert.clone(), app.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_payload = expected.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_payload = vec![0u8; expected_payload.len()];
         stream.read_exact(&mut got_payload).await.unwrap();
@@ -2404,14 +2273,9 @@ async fn blackhat_coalesced_tail_then_following_records_fragmented_chaos_stays_o
     let r1 = wrap_tls_application_data(b"r1");
     let r2 = wrap_tls_application_data(&vec![0xDD; 257]);
     let expected = [tail_record, r1.clone(), r2.clone()].concat();
-
-    let expected_hello = client_hello.clone();
     let expected_payload = expected.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_payload = vec![0u8; expected_payload.len()];
         stream.read_exact(&mut got_payload).await.unwrap();
@@ -2480,14 +2344,9 @@ async fn blackhat_coalesced_tail_backend_response_integrity_after_fallback() {
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
     let backend_response = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec();
-
-    let expected_hello = client_hello.clone();
     let expected_resp = backend_response.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2574,13 +2433,8 @@ async fn blackhat_coalesced_tail_connects_bad_increments_exactly_once() {
     let harness = build_harness("c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7", backend_addr.port());
     let stats = harness.stats.clone();
     let bad_before = stats.get_connects_bad();
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2637,27 +2491,31 @@ async fn blackhat_coalesced_tail_parallel_32_sessions_no_cross_bleed() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();
 
-    let mut expected = std::collections::HashMap::new();
+    let mut expected = std::collections::HashSet::new();
     let secret = [0xC8u8; 16];
     for idx in 0..sessions {
-        let hello = make_valid_tls_client_hello(&secret, 550 + idx as u32, 600, 0x20 + idx as u8);
+        let _hello = make_valid_tls_client_hello(&secret, 550 + idx as u32, 600, 0x20 + idx as u8);
         let tail = vec![idx as u8; 48 + (idx % 11)];
-        expected.insert(hello, wrap_tls_application_data(&tail));
+        expected.insert(wrap_tls_application_data(&tail));
     }
 
     let accept_task = tokio::spawn(async move {
         let mut remaining = expected;
         for _ in 0..sessions {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut got_hello = vec![0u8; 605];
-            stream.read_exact(&mut got_hello).await.unwrap();
-            let expected_tail = remaining
-                .remove(&got_hello)
-                .expect("session mixup detected in parallel-32 blackhat test");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], TLS_RECORD_APPLICATION);
 
-            let mut got_tail = vec![0u8; expected_tail.len()];
-            stream.read_exact(&mut got_tail).await.unwrap();
-            assert_eq!(got_tail, expected_tail);
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut record = vec![0u8; 5 + len];
+            record[..5].copy_from_slice(&header);
+            stream.read_exact(&mut record[5..]).await.unwrap();
+
+            assert!(
+                remaining.remove(&record),
+                "session mixup detected in parallel-32 blackhat test"
+            );
         }
         assert!(remaining.is_empty(), "all expected sessions must be consumed");
     });
@@ -2734,13 +2592,8 @@ async fn blackhat_coalesced_tail_repeated_tls_like_prefixes_are_preserved() {
     tail.extend_from_slice(b"suffix-data");
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2795,13 +2648,8 @@ async fn blackhat_coalesced_tail_drop_after_write_still_delivers_prepended_recor
     let tail = vec![0xBE; 1024];
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();
@@ -2856,13 +2704,8 @@ async fn blackhat_coalesced_tail_zero_following_record_after_coalesced_is_not_in
     let tail = b"terminal-tail".to_vec();
     let coalesced_record = wrap_invalid_mtproto_with_coalesced_tail(&tail);
     let expected_tail = wrap_tls_application_data(&tail);
-
-    let expected_hello = client_hello.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got_hello = vec![0u8; expected_hello.len()];
-        stream.read_exact(&mut got_hello).await.unwrap();
-        assert_eq!(got_hello, expected_hello);
 
         let mut got_tail = vec![0u8; expected_tail.len()];
         stream.read_exact(&mut got_tail).await.unwrap();

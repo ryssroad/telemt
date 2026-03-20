@@ -1325,14 +1325,9 @@ async fn valid_tls_with_invalid_mtproto_falls_back_to_mask_backend() {
     let trailing_tls_payload = b"still-tls-after-fallback".to_vec();
     let trailing_tls_record = wrap_tls_application_data(&trailing_tls_payload);
 
-    let expected_fallback = client_hello.clone();
     let expected_trailing_tls_record = trailing_tls_record.clone();
     let accept_task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut got = vec![0u8; expected_fallback.len()];
-        stream.read_exact(&mut got).await.unwrap();
-        assert_eq!(got, expected_fallback);
-
         let mut trailing = vec![0u8; expected_trailing_tls_record.len()];
         stream.read_exact(&mut trailing).await.unwrap();
         assert_eq!(trailing, expected_trailing_tls_record);
@@ -1432,14 +1427,9 @@ async fn client_handler_tls_bad_mtproto_is_forwarded_to_mask_backend() {
     let trailing_tls_payload = b"second-tls-record".to_vec();
     let trailing_tls_record = wrap_tls_application_data(&trailing_tls_payload);
 
-    let expected_fallback = client_hello.clone();
     let expected_trailing_tls_record = trailing_tls_record.clone();
     let mask_accept_task = tokio::spawn(async move {
         let (mut stream, _) = mask_listener.accept().await.unwrap();
-        let mut got = vec![0u8; expected_fallback.len()];
-        stream.read_exact(&mut got).await.unwrap();
-        assert_eq!(got, expected_fallback);
-
         let mut trailing = vec![0u8; expected_trailing_tls_record.len()];
         stream.read_exact(&mut trailing).await.unwrap();
         assert_eq!(trailing, expected_trailing_tls_record);

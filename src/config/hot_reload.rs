@@ -580,6 +580,11 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.censorship.tls_full_cert_ttl_secs != new.censorship.tls_full_cert_ttl_secs
         || old.censorship.alpn_enforce != new.censorship.alpn_enforce
         || old.censorship.mask_proxy_protocol != new.censorship.mask_proxy_protocol
+        || old.censorship.mask_shape_hardening != new.censorship.mask_shape_hardening
+        || old.censorship.mask_shape_bucket_floor_bytes
+            != new.censorship.mask_shape_bucket_floor_bytes
+        || old.censorship.mask_shape_bucket_cap_bytes
+            != new.censorship.mask_shape_bucket_cap_bytes
     {
         warned = true;
         warn!("config reload: censorship settings changed; restart required");
