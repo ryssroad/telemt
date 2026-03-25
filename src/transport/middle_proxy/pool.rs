@@ -265,9 +265,20 @@ pub struct RoutingCore {
     pub(super) preferred_endpoints_by_dc: ArcSwap<HashMap<i32, Vec<SocketAddr>>>,
 }
 
+pub(super) struct ReinitCore {
+    pub(super) generation: AtomicU64,
+    pub(super) active_generation: AtomicU64,
+    pub(super) warm_generation: AtomicU64,
+    pub(super) pending_hardswap_generation: AtomicU64,
+    pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
+    pub(super) pending_hardswap_map_hash: AtomicU64,
+    pub(super) hardswap: AtomicBool,
+}
+
 #[allow(dead_code)]
 pub struct MePool {
     pub(super) routing: Arc<RoutingCore>,
+    pub(super) reinit: Arc<ReinitCore>,
     pub(super) decision: NetworkDecision,
     pub(super) upstream: Option<Arc<UpstreamManager>>,
     pub(super) rng: Arc<SecureRandom>,
@@ -343,13 +354,6 @@ pub struct MePool {
     pub(super) conn_count: AtomicUsize,
     pub(super) draining_active_runtime: AtomicU64,
     pub(super) stats: Arc<crate::stats::Stats>,
-    pub(super) generation: AtomicU64,
-    pub(super) active_generation: AtomicU64,
-    pub(super) warm_generation: AtomicU64,
-    pub(super) pending_hardswap_generation: AtomicU64,
-    pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
-    pub(super) pending_hardswap_map_hash: AtomicU64,
-    pub(super) hardswap: AtomicBool,
     pub(super) endpoint_quarantine: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
     pub(super) kdf_material_fingerprint: Arc<RwLock<HashMap<SocketAddr, (u64, u16)>>>,
     pub(super) me_pool_drain_ttl_secs: AtomicU64,
@@ -543,6 +547,15 @@ impl MePool {
                 writer_epoch,
                 preferred_endpoints_by_dc: ArcSwap::from_pointee(preferred_endpoints_by_dc),
             }),
+            reinit: Arc::new(ReinitCore {
+                generation: AtomicU64::new(1),
+                active_generation: AtomicU64::new(1),
+                warm_generation: AtomicU64::new(0),
+                pending_hardswap_generation: AtomicU64::new(0),
+                pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
+                pending_hardswap_map_hash: AtomicU64::new(0),
+                hardswap: AtomicBool::new(hardswap),
+            }),
             decision,
             upstream,
             rng,
@@ -664,13 +677,6 @@ impl MePool {
             refill_inflight_dc: Arc::new(Mutex::new(HashSet::new())),
             conn_count: AtomicUsize::new(0),
             draining_active_runtime: AtomicU64::new(0),
-            generation: AtomicU64::new(1),
-            active_generation: AtomicU64::new(1),
-            warm_generation: AtomicU64::new(0),
-            pending_hardswap_generation: AtomicU64::new(0),
-            pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
-            pending_hardswap_map_hash: AtomicU64::new(0),
-            hardswap: AtomicBool::new(hardswap),
             endpoint_quarantine: Arc::new(Mutex::new(HashMap::new())),
             kdf_material_fingerprint: Arc::new(RwLock::new(HashMap::new())),
             me_pool_drain_ttl_secs: AtomicU64::new(me_pool_drain_ttl_secs),
@@ -750,7 +756,7 @@ impl MePool {
     }
 
     pub fn current_generation(&self) -> u64 {
-        self.active_generation.load(Ordering::Relaxed)
+        self.reinit.active_generation.load(Ordering::Relaxed)
     }
 
     pub fn set_runtime_ready(&self, ready: bool) {
@@ -934,7 +940,7 @@ impl MePool {
         me_health_interval_ms_healthy: u64,
         me_warn_rate_limit_ms: u64,
     ) {
-        self.hardswap.store(hardswap, Ordering::Relaxed);
+        self.reinit.hardswap.store(hardswap, Ordering::Relaxed);
         self.me_pool_drain_ttl_secs
             .store(drain_ttl_secs, Ordering::Relaxed);
         self.me_instadrain.store(instadrain, Ordering::Relaxed);

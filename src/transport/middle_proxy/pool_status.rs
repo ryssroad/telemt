@@ -436,6 +436,7 @@ impl MePool {
         let now = Instant::now();
         let now_epoch_secs = Self::now_epoch_secs();
         let pending_started_at = self
+            .reinit
             .pending_hardswap_started_at_epoch_secs
             .load(Ordering::Relaxed);
         let pending_hardswap_age_secs =
@@ -477,11 +478,14 @@ impl MePool {
         }
 
         MeApiRuntimeSnapshot {
-            active_generation: self.active_generation.load(Ordering::Relaxed),
-            warm_generation: self.warm_generation.load(Ordering::Relaxed),
-            pending_hardswap_generation: self.pending_hardswap_generation.load(Ordering::Relaxed),
+            active_generation: self.reinit.active_generation.load(Ordering::Relaxed),
+            warm_generation: self.reinit.warm_generation.load(Ordering::Relaxed),
+            pending_hardswap_generation: self
+                .reinit
+                .pending_hardswap_generation
+                .load(Ordering::Relaxed),
             pending_hardswap_age_secs,
-            hardswap_enabled: self.hardswap.load(Ordering::Relaxed),
+            hardswap_enabled: self.reinit.hardswap.load(Ordering::Relaxed),
             floor_mode: floor_mode_label(self.floor_mode()),
             adaptive_floor_idle_secs: self.me_adaptive_floor_idle_secs.load(Ordering::Relaxed),
             adaptive_floor_min_writers_single_endpoint: self

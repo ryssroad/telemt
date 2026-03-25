@@ -37,16 +37,21 @@ impl MePool {
     }
 
     fn clear_pending_hardswap_state(&self) {
-        self.pending_hardswap_generation.store(0, Ordering::Relaxed);
-        self.pending_hardswap_started_at_epoch_secs
+        self.reinit.pending_hardswap_generation.store(0, Ordering::Relaxed);
+        self.reinit
+            .pending_hardswap_started_at_epoch_secs
             .store(0, Ordering::Relaxed);
-        self.pending_hardswap_map_hash.store(0, Ordering::Relaxed);
-        self.warm_generation.store(0, Ordering::Relaxed);
+        self.reinit
+            .pending_hardswap_map_hash
+            .store(0, Ordering::Relaxed);
+        self.reinit.warm_generation.store(0, Ordering::Relaxed);
     }
 
     async fn promote_warm_generation_to_active(&self, generation: u64) {
-        self.active_generation.store(generation, Ordering::Relaxed);
-        self.warm_generation.store(0, Ordering::Relaxed);
+        self.reinit
+            .active_generation
+            .store(generation, Ordering::Relaxed);
+        self.reinit.warm_generation.store(0, Ordering::Relaxed);
 
         let ws = self.writers.read().await;
         for writer in ws.iter() {
@@ -369,13 +374,17 @@ impl MePool {
 
         let desired_map_hash = Self::desired_map_hash(&desired_by_dc);
         let previous_generation = self.current_generation();
-        let hardswap = self.hardswap.load(Ordering::Relaxed);
+        let hardswap = self.reinit.hardswap.load(Ordering::Relaxed);
         let generation = if hardswap {
-            let pending_generation = self.pending_hardswap_generation.load(Ordering::Relaxed);
+            let pending_generation = self
+                .reinit
+                .pending_hardswap_generation
+                .load(Ordering::Relaxed);
             let pending_started_at = self
+                .reinit
                 .pending_hardswap_started_at_epoch_secs
                 .load(Ordering::Relaxed);
-            let pending_map_hash = self.pending_hardswap_map_hash.load(Ordering::Relaxed);
+            let pending_map_hash = self.reinit.pending_hardswap_map_hash.load(Ordering::Relaxed);
             let pending_age_secs = now_epoch_secs.saturating_sub(pending_started_at);
             let pending_ttl_expired =
                 pending_started_at > 0 && pending_age_secs > ME_HARDSWAP_PENDING_TTL_SECS;
@@ -405,24 +414,28 @@ impl MePool {
                         "ME hardswap pending generation expired by TTL; starting fresh generation"
                     );
                 }
-                let next_generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-                self.pending_hardswap_generation
+                let next_generation = self.reinit.generation.fetch_add(1, Ordering::Relaxed) + 1;
+                self.reinit
+                    .pending_hardswap_generation
                     .store(next_generation, Ordering::Relaxed);
-                self.pending_hardswap_started_at_epoch_secs
+                self.reinit
+                    .pending_hardswap_started_at_epoch_secs
                     .store(now_epoch_secs, Ordering::Relaxed);
-                self.pending_hardswap_map_hash
+                self.reinit
+                    .pending_hardswap_map_hash
                     .store(desired_map_hash, Ordering::Relaxed);
-                self.warm_generation
+                self.reinit
+                    .warm_generation
                     .store(next_generation, Ordering::Relaxed);
                 next_generation
             }
         } else {
             self.clear_pending_hardswap_state();
-            self.generation.fetch_add(1, Ordering::Relaxed) + 1
+            self.reinit.generation.fetch_add(1, Ordering::Relaxed) + 1
         };
 
         if hardswap {
-            self.warm_generation.store(generation, Ordering::Relaxed);
+            self.reinit.warm_generation.store(generation, Ordering::Relaxed);
             self.warmup_generation_for_all_dcs(rng, generation, &desired_by_dc)
                 .await;
         } else {
