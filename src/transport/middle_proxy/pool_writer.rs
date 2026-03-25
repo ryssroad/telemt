@@ -195,7 +195,9 @@ impl MePool {
             drain_deadline_epoch_secs: drain_deadline_epoch_secs.clone(),
             allow_drain_fallback: allow_drain_fallback.clone(),
         };
-        self.writers.write().await.push(writer.clone());
+        self.writers
+            .update(|writers| writers.push(writer.clone()))
+            .await;
         self.registry.register_writer(writer_id, tx.clone()).await;
         self.registry.mark_writer_idle(writer_id).await;
         self.conn_count.fetch_add(1, Ordering::Relaxed);

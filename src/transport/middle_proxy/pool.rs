@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -54,6 +55,87 @@ pub struct MeWriter {
     pub draining_started_at_epoch_secs: Arc<AtomicU64>,
     pub drain_deadline_epoch_secs: Arc<AtomicU64>,
     pub allow_drain_fallback: Arc<AtomicBool>,
+}
+
+pub(super) struct WritersState {
+    // HARD INVARIANT:
+    // All writers.store() calls MUST be guarded by writers_write_guard.
+    writers: ArcSwap<Vec<MeWriter>>,
+    writers_write_guard: Mutex<()>,
+}
+
+impl WritersState {
+    pub(super) fn new() -> Self {
+        Self {
+            writers: ArcSwap::from_pointee(Vec::new()),
+            writers_write_guard: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> Arc<Vec<MeWriter>> {
+        self.writers.load_full()
+    }
+
+    pub(super) async fn read(&self) -> Arc<Vec<MeWriter>> {
+        self.snapshot()
+    }
+
+    pub(super) async fn write(&self) -> WritersWriteGuard<'_> {
+        let guard = self.writers_write_guard.lock().await;
+        let writers = (*self.writers.load_full()).clone();
+        WritersWriteGuard {
+            state: self,
+            _guard: guard,
+            writers,
+        }
+    }
+
+    pub(super) async fn update<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Vec<MeWriter>) -> R,
+    {
+        let mut guard = self.write().await;
+        f(&mut guard)
+    }
+
+    fn debug_assert_store_guarded(&self) {
+        debug_assert!(
+            self.writers_write_guard.try_lock().is_err(),
+            "HARD INVARIANT violated: writers.store() without writers_write_guard"
+        );
+    }
+
+    fn store_guarded(&self, writers: Vec<MeWriter>) {
+        self.debug_assert_store_guarded();
+        self.writers.store(Arc::new(writers));
+    }
+}
+
+pub(super) struct WritersWriteGuard<'a> {
+    state: &'a WritersState,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    writers: Vec<MeWriter>,
+}
+
+impl Deref for WritersWriteGuard<'_> {
+    type Target = Vec<MeWriter>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writers
+    }
+}
+
+impl DerefMut for WritersWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writers
+    }
+}
+
+impl Drop for WritersWriteGuard<'_> {
+    fn drop(&mut self) {
+        let writers = std::mem::take(&mut self.writers);
+        self.state.store_guarded(writers);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,7 +260,7 @@ pub struct SecretSnapshot {
 #[allow(dead_code)]
 pub struct MePool {
     pub(super) registry: Arc<ConnRegistry>,
-    pub(super) writers: Arc<RwLock<Vec<MeWriter>>>,
+    pub(super) writers: Arc<WritersState>,
     pub(super) rr: AtomicU64,
     pub(super) decision: NetworkDecision,
     pub(super) upstream: Option<Arc<UpstreamManager>>,
@@ -307,7 +389,7 @@ pub struct MePool {
     pub(super) me_last_drain_gate_updated_at_epoch_secs: AtomicU64,
     pub(super) runtime_ready: AtomicBool,
     pool_size: usize,
-    pub(super) preferred_endpoints_by_dc: Arc<RwLock<HashMap<i32, Vec<SocketAddr>>>>,
+    pub(super) preferred_endpoints_by_dc: ArcSwap<HashMap<i32, Vec<SocketAddr>>>,
 }
 
 #[derive(Debug, Default)]
@@ -443,7 +525,7 @@ impl MePool {
         let now_epoch_secs = Self::now_epoch_secs();
         Arc::new(Self {
             registry,
-            writers: Arc::new(RwLock::new(Vec::new())),
+            writers: Arc::new(WritersState::new()),
             rr: AtomicU64::new(0),
             decision,
             upstream,
@@ -649,7 +731,7 @@ impl MePool {
             me_last_drain_gate_block_reason: AtomicU8::new(MeDrainGateReason::Open as u8),
             me_last_drain_gate_updated_at_epoch_secs: AtomicU64::new(now_epoch_secs),
             runtime_ready: AtomicBool::new(false),
-            preferred_endpoints_by_dc: Arc::new(RwLock::new(preferred_endpoints_by_dc)),
+            preferred_endpoints_by_dc: ArcSwap::from_pointee(preferred_endpoints_by_dc),
         })
     }
 
@@ -1004,7 +1086,7 @@ impl MePool {
         MeSocksKdfPolicy::from_u8(self.me_socks_kdf_policy.load(Ordering::Relaxed))
     }
 
-    pub(super) fn writers_arc(&self) -> Arc<RwLock<Vec<MeWriter>>> {
+    pub(super) fn writers_arc(&self) -> Arc<WritersState> {
         self.writers.clone()
     }
 
@@ -1602,7 +1684,7 @@ impl MePool {
         let rebuilt = Self::build_endpoint_dc_map_from_maps(&map_v4, &map_v6);
         let preferred = Self::build_preferred_endpoints_by_dc(&self.decision, &map_v4, &map_v6);
         *self.endpoint_dc_map.write().await = rebuilt;
-        *self.preferred_endpoints_by_dc.write().await = preferred;
+        self.preferred_endpoints_by_dc.store(Arc::new(preferred));
         let configured_endpoints = self
             .endpoint_dc_map
             .read()
@@ -1622,7 +1704,7 @@ impl MePool {
     }
 
     pub(super) async fn preferred_endpoints_for_dc(&self, dc: i32) -> Vec<SocketAddr> {
-        let guard = self.preferred_endpoints_by_dc.read().await;
+        let guard = self.preferred_endpoints_by_dc.load();
         guard.get(&dc).cloned().unwrap_or_default()
     }
 

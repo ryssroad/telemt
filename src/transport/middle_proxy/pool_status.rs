@@ -160,7 +160,7 @@ impl MePool {
 
         let writers = self.writers.read().await.clone();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
-        for writer in writers {
+        for writer in writers.iter() {
             if writer.draining.load(Ordering::Relaxed) {
                 continue;
             }
@@ -197,7 +197,7 @@ impl MePool {
 
         let writers = self.writers.read().await.clone();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
-        for writer in writers {
+        for writer in writers.iter() {
             if writer.draining.load(Ordering::Relaxed) {
                 continue;
             }
@@ -255,7 +255,7 @@ impl MePool {
         let mut dc_rtt_agg = HashMap::<i16, (f64, u64)>::new();
         let mut writer_rows = Vec::<MeApiWriterStatusSnapshot>::with_capacity(writers.len());
 
-        for writer in writers {
+        for writer in writers.iter() {
             let endpoint = writer.addr;
             let dc = i16::try_from(writer.writer_dc).ok();
             let draining = writer.draining.load(Ordering::Relaxed);

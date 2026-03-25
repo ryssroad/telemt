@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::hash::{BuildHasher, Hash};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,6 @@ enum C2MeCommand {
 
 const DESYNC_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const DESYNC_DEDUP_MAX_ENTRIES: usize = 65_536;
-const DESYNC_DEDUP_PRUNE_SCAN_LIMIT: usize = 1024;
 const DESYNC_FULL_CACHE_EMIT_MIN_INTERVAL: Duration = Duration::from_millis(1000);
 const DESYNC_ERROR_CLASS: &str = "frame_too_large_crypto_desync";
 const C2ME_CHANNEL_CAPACITY_FALLBACK: usize = 128;
@@ -57,11 +56,17 @@ const ME_D2C_FRAME_BUF_SHRINK_HYSTERESIS_FACTOR: usize = 2;
 const ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES: usize = 128 * 1024;
 const QUOTA_RESERVE_SPIN_RETRIES: usize = 32;
 static DESYNC_DEDUP: OnceLock<DashMap<u64, Instant>> = OnceLock::new();
+static DESYNC_DEDUP_PREVIOUS: OnceLock<DashMap<u64, Instant>> = OnceLock::new();
 static DESYNC_HASHER: OnceLock<RandomState> = OnceLock::new();
 static DESYNC_FULL_CACHE_LAST_EMIT_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-static DESYNC_DEDUP_EVER_SATURATED: OnceLock<AtomicBool> = OnceLock::new();
+static DESYNC_DEDUP_ROTATION_STATE: OnceLock<Mutex<DesyncDedupRotationState>> = OnceLock::new();
 static RELAY_IDLE_CANDIDATE_REGISTRY: OnceLock<Mutex<RelayIdleCandidateRegistry>> = OnceLock::new();
 static RELAY_IDLE_MARK_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct DesyncDedupRotationState {
+    current_started_at: Option<Instant>,
+}
 
 struct RelayForensicsState {
     trace_id: u64,
@@ -312,64 +317,76 @@ fn should_emit_full_desync(key: u64, all_full: bool, now: Instant) -> bool {
         return true;
     }
 
-    let dedup = DESYNC_DEDUP.get_or_init(DashMap::new);
-    let saturated_before = dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES;
-    let ever_saturated = DESYNC_DEDUP_EVER_SATURATED.get_or_init(|| AtomicBool::new(false));
-    if saturated_before {
-        ever_saturated.store(true, Ordering::Relaxed);
-    }
+    let dedup_current = DESYNC_DEDUP.get_or_init(DashMap::new);
+    let dedup_previous = DESYNC_DEDUP_PREVIOUS.get_or_init(DashMap::new);
+    let rotation_state = DESYNC_DEDUP_ROTATION_STATE
+        .get_or_init(|| Mutex::new(DesyncDedupRotationState::default()));
 
-    if let Some(mut seen_at) = dedup.get_mut(&key) {
-        if now.duration_since(*seen_at) >= DESYNC_DEDUP_WINDOW {
-            *seen_at = now;
-            return true;
+    let mut state = match rotation_state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = DesyncDedupRotationState::default();
+            rotation_state.clear_poison();
+            guard
         }
-        return false;
-    }
-
-    if dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES {
-        let mut stale_keys = Vec::new();
-        let mut oldest_candidate: Option<(u64, Instant)> = None;
-        for entry in dedup.iter().take(DESYNC_DEDUP_PRUNE_SCAN_LIMIT) {
-            let key = *entry.key();
-            let seen_at = *entry.value();
-
-            match oldest_candidate {
-                Some((_, oldest_seen)) if seen_at >= oldest_seen => {}
-                _ => oldest_candidate = Some((key, seen_at)),
-            }
-
-            if now.duration_since(seen_at) >= DESYNC_DEDUP_WINDOW {
-                stale_keys.push(*entry.key());
-            }
-        }
-        for stale_key in stale_keys {
-            dedup.remove(&stale_key);
-        }
-        if dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES {
-            let Some((evict_key, _)) = oldest_candidate else {
-                return false;
-            };
-            dedup.remove(&evict_key);
-            dedup.insert(key, now);
-            return should_emit_full_desync_full_cache(now);
-        }
-    }
-
-    dedup.insert(key, now);
-    let saturated_after = dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES;
-    // Preserve the first sequential insert that reaches capacity as a normal
-    // emit, while still gating concurrent newcomer churn after the cache has
-    // ever been observed at saturation.
-    let was_ever_saturated = if saturated_after {
-        ever_saturated.swap(true, Ordering::Relaxed)
-    } else {
-        ever_saturated.load(Ordering::Relaxed)
     };
 
-    if saturated_before || (saturated_after && was_ever_saturated) {
+    let rotate_now = match state.current_started_at {
+        Some(current_started_at) => match now.checked_duration_since(current_started_at) {
+            Some(elapsed) => elapsed >= DESYNC_DEDUP_WINDOW,
+            None => true,
+        },
+        None => true,
+    };
+    if rotate_now {
+        dedup_previous.clear();
+        for entry in dedup_current.iter() {
+            dedup_previous.insert(*entry.key(), *entry.value());
+        }
+        dedup_current.clear();
+        state.current_started_at = Some(now);
+    }
+
+    if let Some(seen_at) = dedup_current.get(&key).map(|entry| *entry.value()) {
+        let within_window = match now.checked_duration_since(seen_at) {
+            Some(elapsed) => elapsed < DESYNC_DEDUP_WINDOW,
+            None => true,
+        };
+        if within_window {
+            return false;
+        }
+        dedup_current.insert(key, now);
+        return true;
+    }
+
+    if let Some(seen_at) = dedup_previous.get(&key).map(|entry| *entry.value()) {
+        let within_window = match now.checked_duration_since(seen_at) {
+            Some(elapsed) => elapsed < DESYNC_DEDUP_WINDOW,
+            None => true,
+        };
+        if within_window {
+            // Keep the original timestamp when promoting from previous bucket,
+            // so dedup expiry remains tied to first-seen time.
+            dedup_current.insert(key, seen_at);
+            return false;
+        }
+        dedup_previous.remove(&key);
+    }
+
+    if dedup_current.len() >= DESYNC_DEDUP_MAX_ENTRIES {
+        // Bounded eviction path: rotate buckets instead of scanning/evicting
+        // arbitrary entries from a saturated single map.
+        dedup_previous.clear();
+        for entry in dedup_current.iter() {
+            dedup_previous.insert(*entry.key(), *entry.value());
+        }
+        dedup_current.clear();
+        state.current_started_at = Some(now);
+        dedup_current.insert(key, now);
         should_emit_full_desync_full_cache(now)
     } else {
+        dedup_current.insert(key, now);
         true
     }
 }
@@ -405,8 +422,20 @@ fn clear_desync_dedup_for_testing() {
     if let Some(dedup) = DESYNC_DEDUP.get() {
         dedup.clear();
     }
-    if let Some(ever_saturated) = DESYNC_DEDUP_EVER_SATURATED.get() {
-        ever_saturated.store(false, Ordering::Relaxed);
+    if let Some(dedup_previous) = DESYNC_DEDUP_PREVIOUS.get() {
+        dedup_previous.clear();
+    }
+    if let Some(rotation_state) = DESYNC_DEDUP_ROTATION_STATE.get() {
+        match rotation_state.lock() {
+            Ok(mut guard) => {
+                *guard = DesyncDedupRotationState::default();
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = DesyncDedupRotationState::default();
+                rotation_state.clear_poison();
+            }
+        }
     }
     if let Some(last_emit_at) = DESYNC_FULL_CACHE_LAST_EMIT_AT.get() {
         match last_emit_at.lock() {
